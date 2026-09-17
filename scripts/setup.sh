@@ -15,7 +15,7 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-$HOME/exllamav3-amd}"
 REPO_URL="${REPO_URL:-https://github.com/vcruz305/exllamav3-amd.git}"
-BRANCH="${BRANCH:-strix-halo}"
+BRANCH="${BRANCH:-main}"   # main == strix-halo (the fork's default)
 PY="${PY:-3.12}"
 
 command -v uv >/dev/null || { curl -LsSf https://astral.sh/uv/install.sh | sh; export PATH="$HOME/.local/bin:$PATH"; }

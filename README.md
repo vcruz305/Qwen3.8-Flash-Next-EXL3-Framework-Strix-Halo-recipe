@@ -25,6 +25,9 @@ on a DGX Spark GB10 ([sibling recipe](https://github.com/vcruz305/Qwen3.8-Flash-
 71–73 code / 46.5 prose). Everything is bandwidth: this part streams ~135 GB/s per kernel
 against a 236 GB/s DRAM peak, and decode is 4.9 GiB of weight reads per verify step.
 
+**Using a coding agent to set this up?** Point it at [AGENTS.md](AGENTS.md) first — the
+contract, the definition of done, and the traps in the order an agent will hit them.
+
 ## Contents
 
 - [Quick start](#quick-start)
@@ -66,7 +69,7 @@ cd Qwen3.8-Flash-Next-EXL3-Framework-Strix-Halo-recipe
 bash scripts/setup.sh
 ```
 
-This clones [`exllamav3-amd`](https://github.com/vcruz305/exllamav3-amd) branch `strix-halo`
+This clones [`exllamav3-amd`](https://github.com/vcruz305/exllamav3-amd) branch `main`
 to `~/exllamav3-amd`, creates a runtime venv (torch `2.10.0+rocm7.0`, Python 3.12) and a
 build-only venv (AMD's gfx1151 nightly `rocm-sdk-devel` for `hipcc` and device bitcode),
 builds the HIP extension with `EXL3_HIP_DEFINES="EXL3_HIP_STG_PAD"` (~90 s, 37 translation
@@ -118,7 +121,7 @@ throughput by ~30%.
 
 ## What the runtime fork changes
 
-[`vcruz305/exllamav3-amd`](https://github.com/vcruz305/exllamav3-amd), branch `strix-halo`, is
+[`vcruz305/exllamav3-amd`](https://github.com/vcruz305/exllamav3-amd) (`main`; `strix-halo` is the same history) is
 based on `sdougbrown/exllamav3` branch `integration` @ `991f1a0` (the community AMD/HIP port,
 whose fast path is hard-gated to RDNA4 gfx1200/1201). Cumulative, each step measured
 independently on this box, PPL identical throughout:
@@ -141,7 +144,7 @@ independently on this box, PPL identical throughout:
 Also ported and kept, default off because they measured as nulls on this GPU: int8 GEMV
 (`EXL3_INT8_GEMV`), CPU expert offload (`--moe_cpu_split`, a net *loss* on unified memory),
 row-looped mixer kernels, a deeper B-prefetch ring, and the reduce-buffer pad. The fork's
-[`README.strix-halo.md`](https://github.com/vcruz305/exllamav3-amd/blob/strix-halo/README.strix-halo.md)
+[`README.strix-halo.md`](https://github.com/vcruz305/exllamav3-amd/blob/main/README.strix-halo.md)
 has the full table, the null-result reasoning, and the 40+ profiling harnesses under
 `tools/strix_halo/`.
 
@@ -243,8 +246,8 @@ Each of these looks like broken hardware and each is encoded in `scripts/env.sh`
 |---|---|
 | `HIP error: invalid device function` | ROCm 6.4 torch. `pip list \| grep torch` must say `+rocm7.0`; `get_arch_list()` must include `gfx1151`. |
 | exit 139 / segfault in `libhsa-runtime64.so` on first alloc | Trap 2 — `LD_PRELOAD` missing. `source env.sh` every shell. |
-| `exl3_gemv_supported: False` after setup | Wrong branch (`integration` instead of `strix-halo`) or stale install. `git -C ~/exllamav3-amd branch`; rebuild. |
-| `RuntimeError: exl3_moe_gfx12_k3 requires gfx1200/gfx1201` | Stock fork gate; you are not on `strix-halo`. |
+| `exl3_gemv_supported: False` after setup | Wrong branch (`integration` instead of `main`) or stale install. `git -C ~/exllamav3-amd branch`; rebuild. |
+| `RuntimeError: exl3_moe_gfx12_k3 requires gfx1200/gfx1201` | Stock fork gate; you are not on `main`. |
 | `Insufficient VRAM in split for model and cache` | Either a build shell (trap 5), `-ndt ≥ 6`, or the GPU memory limit in BIOS is below ~60 GB. |
 | `RuntimeError: recurrent_state must be [num_slots, max_history + 1, ...]` | Custom script with `-mtp`: `Cache(max_history=)` must equal `num_draft_tokens` on **both** caches. `bench_mtp.py` shows the pattern. |
 | Zero tokens generated, no error | Print `res["error"]` from `gen.iterate()`; the generator swallows job errors into the result dict. |
@@ -259,7 +262,7 @@ Each of these looks like broken hardware and each is encoded in `scripts/env.sh`
 | Repo | Role |
 |---|---|
 | [turboderp/Qwen3.8-Flash-Next-exl3](https://huggingface.co/turboderp/Qwen3.8-Flash-Next-exl3) | the pack this recipe runs |
-| **[vcruz305/exllamav3-amd](https://github.com/vcruz305/exllamav3-amd)** (`strix-halo`) | **the runtime fork this recipe builds**: RDNA 3.5 WMMA GEMV, un-gated grouped MoE, LDS fix, skinny GEMM, int8 mixers, all harnesses. |
+| **[vcruz305/exllamav3-amd](https://github.com/vcruz305/exllamav3-amd)** (`main`) | **the runtime fork this recipe builds**: RDNA 3.5 WMMA GEMV, un-gated grouped MoE, LDS fix, skinny GEMM, int8 mixers, all harnesses. |
 | [sdougbrown/exllamav3](https://github.com/sdougbrown/exllamav3) `integration` | the community AMD/HIP port the fork is based on (remote `upstream`, @ `991f1a0`) |
 | [vcruz305/exllamav3](https://github.com/vcruz305/exllamav3) | my *NVIDIA* fork (aarch64 + GB10 tuning) — different base, used by the Spark recipes, not this one |
 | [Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe) | the same pack on a DGX Spark GB10 via vLLM + vllm-exl3 and the native engine; sibling this recipe is modeled on |

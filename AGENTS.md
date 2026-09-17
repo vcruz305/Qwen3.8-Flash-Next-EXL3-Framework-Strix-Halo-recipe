@@ -1,0 +1,142 @@
+# AGENTS.md — for coding agents setting this up
+
+You are setting up Qwen3.8-Flash-Next (EXL3, 80 GB) on an AMD Strix Halo machine
+(Ryzen AI MAX+ 395, Radeon 8060S, `gfx1151`) using the `exllamav3-amd` runtime fork. This
+file is the contract: what to run, what "done" looks like, and the failure modes that
+will waste your context window if you debug them from first principles. Read it whole
+before acting. Every rule here cost real hours; none is stylistic.
+
+## Do this, in order
+
+```bash
+git clone https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-Framework-Strix-Halo-recipe.git
+cd Qwen3.8-Flash-Next-EXL3-Framework-Strix-Halo-recipe
+bash scripts/setup.sh        # ~10 min. Needs sudo once (apt). Idempotent; rerun on failure.
+bash scripts/download.sh     # ~80 GB from Hugging Face to ~/models/Qwen3.8-Flash-Next-EXL3
+bash scripts/run.sh -prompt "Explain gradient descent in two sentences." -no_think
+```
+
+**Done means** the last command prints a coherent answer followed by a line like
+`Generate: N tokens at 35-47 t/s - Draft: X / Y accepted (60-90%)`. Anything under
+~30 t/s with the draft line present, or a missing draft line, is a misconfiguration —
+see "Speed is wrong" below. Do not declare success on "it produced text".
+
+`setup.sh` ends with a self-check that must print `exl3_gemv_supported: True wmma_family: 2`.
+If it prints `False`, stop and read Trap 1–2 below; do not proceed to the download.
+
+## Preconditions to verify before you start
+
+- `lsb_release -ds` → Ubuntu 26.04 (24.04 probably works, untested). Kernel ≥ 6.14 with
+  in-tree `amdgpu`. `grep gfx_target_version /sys/class/kfd/kfd/topology/nodes/1/properties`
+  must say `110501`. If the node index differs, search all nodes.
+- ≥ 96 GB system RAM and the iGPU allowed ≥ 60 GB of it. After setup:
+  `~/exllamav3-amd/.venv/bin/python -c "import torch;print(torch.cuda.get_device_properties(0).total_memory/2**30)"`
+  must print ≥ 60. If not, the fix is in **BIOS** (iGPU memory allocation), not software.
+  Tell the user; you cannot fix it from a shell.
+- ~100 GB free on the disk holding `~/models` and `~/exllamav3-amd`.
+- `/dev/kfd` and `/dev/dri/renderD128` readable by the user. Test with
+  `python3 -c "open('/dev/kfd','rb')"`, not by checking group membership — the nodes often
+  carry ACLs that make `render`/`video` membership unnecessary.
+- Do **not** install ROCm from AMD's apt repo. Ubuntu 26.04 has none, and you do not need
+  it: the torch wheel ships the runtime and the build borrows a toolchain from a pip wheel.
+
+## The five traps (each looks like broken hardware)
+
+1. **`torch.cuda.is_available()` lies.** ROCm 6.4 wheels have no gfx1151 code object;
+   `is_available()` is `True`, then every kernel dies with `HIP error: invalid device
+   function`. Check `torch.cuda.get_arch_list()` contains `gfx1151`. `setup.sh` installs
+   `torch==2.10.0+rocm7.0`, which does. Never set `HSA_OVERRIDE_GFX_VERSION` — it does not
+   rescue 6.4 and it corrupts kernel selection on 7.0.
+2. **torch's bundled HSA runtime segfaults on the first allocation** (exit 139,
+   `segfault ... in libhsa-runtime64.so`). Even `torch.zeros(4, device="cuda")`. No env var
+   avoids it. `env.sh` fixes it with
+   `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libhsa-runtime64.so.1` (Ubuntu's package). **Every
+   shell that runs the model must `source ~/exllamav3-amd/env.sh` first.** If you write your
+   own launcher and skip this, it segfaults and you will blame the driver.
+3. **No `hipcc` in the torch wheel.** The extension build fails with the misleading
+   `CUDA_HOME environment variable is not set`. `setup.sh` installs AMD's gfx1151 nightly
+   `rocm[libraries,devel]` into a *separate* venv (`.venv-gfx1151`) purely as a toolchain.
+   Use `_rocm_sdk_devel`, not `_rocm_sdk_core` (only devel has `hipsparse.h`, `thrust/`).
+   The 1.6 GB wheel needs `UV_HTTP_TIMEOUT=600` or it times out mid-extraction and looks
+   like a corrupt download.
+4. **Device bitcode is at `lib/llvm/amdgcn/bitcode`**, not where clang probes →
+   `cannot find ROCm device library`. `env.sh build` passes `--rocm-device-lib-path`.
+   Build with `pip install --no-build-isolation --no-deps .`, **not `uv pip`** —
+   `setup.py` imports its own package from the source tree and uv's isolated backend
+   can't see it (`ModuleNotFoundError: No module named 'exllamav3'`).
+5. **Build env is poison at runtime.** `source env.sh build` exports SDK paths whose HSA
+   runtime overrides the preload and re-triggers Trap 2 — or, more confusingly, makes model
+   load fail with a spurious `Insufficient VRAM`. **Build in one shell, run in a fresh
+   one.** `setup.sh` does the build in a subshell for this reason.
+
+## Speed is wrong
+
+Expected: 35–47 t/s single stream, greedy, with `Draft: ... accepted (60–90%)` printed.
+
+| You see | Cause |
+|---|---|
+| ~4–5 t/s | WMMA path inactive (`exl3_gemv_supported() == False`). Wrong branch (`integration` instead of `main`/`strix-halo`) or stale extension. `git -C ~/exllamav3-amd log --oneline -1` should show a gfx1151 commit; rebuild. |
+| ~15–20 t/s, no `Draft:` line | MTP off. `run.sh` passes `-mtp -ndt 3 -dds -dc 0.6`; if you wrote your own invocation, add them. |
+| ~30 t/s with draft line | `EXL3_MOE_CFG=2` / `EXL3_HIP_PREFILL_MIN_ROWS=2` not exported. `run.sh` sets them. |
+| Numbers vary ±25% run to run | You are sampling. Benchmark greedy (`bench_mtp.py -g`); acceptance is deterministic only under greedy. |
+| One prompt at 47, another at 35 | Normal. Draft acceptance is content-dependent. Quote `prompt_sweep.py`'s six-prompt mean, never a single prompt. |
+
+**Do not attempt further kernel optimisation** unless the user explicitly asks. Every bulk
+kernel already streams at this GPU's practical single-kernel rate (~135 GB/s); the fork's
+`README.strix-halo.md` documents nine measured null results (int8 GEMV, CPU offload,
+prefetch depth, reduce-pad, row-looped mixers, graph replay, …). Re-running them is the most
+likely way to burn a day here. ~41 t/s mean is the ceiling for this pack on this GPU.
+
+## Things that will bite a custom script
+
+- **MTP caches**: `Cache(..., max_history=N)` must equal `num_draft_tokens` on **both** the
+  trunk and draft caches, or: `RuntimeError: recurrent_state must be [num_slots,
+  max_history + 1, ...]`. `-ndt ≥ 6` OOMs (MTP costs ~8 GiB). Copy `scripts/bench_mtp.py`.
+- **Silent failures**: the generator swallows job exceptions into `res["error"]`. If you get
+  zero tokens and no traceback, print that key inside `gen.iterate()` before touching
+  anything else.
+- **The pack must stay as published.** `ngram_embedding.safetensors` (32.6 GB) is *not* in
+  `model.safetensors.index.json` and must not be added — the engine loads it file-backed,
+  which is the only reason an 80 GB pack fits in 61 GiB. The `prepare_pack.sh` /
+  `regenerate_safetensors_index.py` tools in the sibling **DGX Spark** recipes are for the
+  vLLM plugin path and are wrong here. If you already ran them, re-download or use
+  `make_native_view.sh` from that recipe.
+- **`pip install .` copies the Python tree** into site-packages. Scripts run from the repo
+  root import the live tree; `eval/ppl.py` and `tests/` import the installed copy. After
+  editing any `.py`, reinstall or your fix "works in one harness and not the other".
+  Likewise the repo-root `exllamav3_ext*.so` shadows the installed one — `setup.sh` copies
+  the fresh build over it; if you rebuild by hand, do the same or you benchmark old code.
+- **`chat.py` mode**: `-mode qwen35`. There is no `auto`. It also needs `pyperclip` and
+  `prompt_toolkit` (installed by `setup.sh`).
+- **Cosmetic noise you should ignore**: `Resource leak detected by SharedSignalPool, ~620
+  Signals leaked` at exit; pages of `_POSIX_C_SOURCE` redefinition warnings from Triton's
+  first JIT; `amdgpu.ids: No such file or directory`. `hipblaslt 'out of memory'` at load
+  right after another process exited is a workspace race — wait 5 s and retry once before
+  investigating.
+
+## Operational hygiene on a shared box
+
+- Never `pkill -f "python.*something"` over ssh — the pattern matches the ssh session's own
+  shell and kills it first. Use the PID.
+- Never `while pgrep -f <name>` in the same shell command that contains `<name>` — it matches
+  itself and spins forever.
+- Write remote logs on the remote (`> /tmp/x.log 2>&1`), never `ssh ... | grep | tail`: when
+  the connection drops the pipe loses everything.
+- The model takes ~20 s to load; back-to-back runs need `sleep 6` between them.
+
+## What not to change
+
+`scripts/env.sh` — every line is one of the five traps. `setup.sh`'s venv split (runtime vs
+build SDK). The `EXL3_HIP_DEFINES="EXL3_HIP_STG_PAD"` build flag (+10%, the LDS bank-conflict
+fix). The pack contents.
+
+## Where the detail lives
+
+- Runtime fork, engineering log, 40+ harnesses:
+  https://github.com/vcruz305/exllamav3-amd (`README.strix-halo.md`, `tools/strix_halo/`)
+- This recipe's `README.md`: results, tuning table, hardware, troubleshooting matrix.
+- Same pack on NVIDIA DGX Spark (different fork, different traps — do not mix instructions):
+  https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe
+
+If you hit something not covered here, the fork's `README.strix-halo.md` almost certainly
+covers it. Check there before inventing a workaround.
