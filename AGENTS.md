@@ -91,7 +91,7 @@ likely way to burn a day here. ~41 t/s mean is the ceiling for this pack on this
 
 - fp16 KV cache: loads up to `-cs 106496`; 114688+ OOMs **at load** (transient — steady state
   would fit). Q4 cache (`-cq 4`): the model's full **262,144** loads (58.3 GiB) and decodes at
-  30.9 tok/s with the cache completely full. `CACHE=262144 CQ=4 bash scripts/run.sh`.
+  30.9 tok/s with the cache completely full. **`run.sh` defaults to 200k + Q4**; `CACHE=262144` for the full window, `CACHE=32768 CQ=` for a short fp16 cache.
 - Cold prefill is 315–350 tok/s. A 262k prompt is a 14-minute TTFT. Do not report a
   "hang" before that. Don't be fooled by 900–1,500 tok/s prefill on repetitive text — that
   is the n-gram path recognising repeats, not the real rate.

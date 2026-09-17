@@ -22,7 +22,7 @@ Measured on `framework2` (Framework Desktop, Ubuntu 26.04), 2026-09-17, greedy, 
 | Decode with the cache **full** (262,005-token cold prompt, Q4) | **30.9 tok/s**, 63% acceptance |
 | Cold prefill | 315–350 tok/s on real prose; up to 1,500 tok/s on repetitive text (n-gram path) |
 | TTFT, 262k cold prompt | 833 s (13.9 min) |
-| GPU memory at load (model + MTP head + 32k cache) | 57.8 GiB of 61.4 GiB visible |
+| GPU memory at load (model + MTP head + 200k Q4 cache) | ~57.7 GiB of 61.4 GiB visible |
 
 That is **11× the fork's stock fallback path** and about 60–65% of what the same pack does
 on a DGX Spark GB10 ([sibling recipe](https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-DGX-Spark-recipe):
@@ -106,7 +106,9 @@ bash scripts/run.sh -prompt "Explain gradient descent in two sentences."
 ```
 
 `run.sh` is `examples/chat.py` with the measured-best flags:
-`-mode qwen35 -mtp -ndt 3 -dds -dc 0.6 -cs 32768 -tps` and `EXL3_MOE_CFG=2 EXL3_HIP_PREFILL_MIN_ROWS=2`.
+`-mode qwen35 -mtp -ndt 3 -dds -dc 0.6 -cs 204800 -cq 4 -tps` and `EXL3_MOE_CFG=2 EXL3_HIP_PREFILL_MIN_ROWS=2`.
+**Default context is 200k tokens with a Q4 KV cache** (see [Context length](#context-length));
+`CACHE=262144` gives the full window, `CACHE=32768 CQ=` a short fp16 cache that is ~2 tok/s faster.
 `NDT=2 DC=0.4 bash scripts/run.sh` gives the higher-acceptance point (better on the easiest
 prompts, ~2% lower mean). Any other `chat.py` flag passes through.
 
@@ -165,8 +167,8 @@ has the full table, the null-result reasoning, and the 40+ profiling harnesses u
 | `EXL3_HIP_SKINNY_GEMM` | 1 | 0 → hipblaslt for the small GDN projections, −2.5%. |
 | `EXL3_BLOCK_GRAPH` | unset | Graph replay: neutral under MTP at every speed tested (47.0 vs 47.4 last). Not launch-bound. |
 | `EXL3_INT8_GEMV` | unset | 1/2 → within 0.3 tok/s of off. m≤2 GEMVs are 6% of decode. |
-| `-cs` (cache tokens) | 32768 | Memory, not speed. fp16 loads to 106k; **`-cq 4` loads the full 262,144**. See [Context length](#context-length). |
-| `-cq` (cache quant) | unset (fp16) | `4` → 262k fits, −2 tok/s. `8` → 131k tested. |
+| `-cs` (cache tokens) | 204800 | Memory, not speed. fp16 loads to 106k; **`-cq 4` loads the full 262,144**. See [Context length](#context-length). |
+| `-cq` (cache quant) | 4 | `4` → 262k fits, −2 tok/s. `8` → 131k tested. |
 
 ## Context length
 
@@ -212,7 +214,7 @@ recognising repetition — **315–350 tok/s is the honest cold prefill rate**, 
 262k prompt a 14-minute wait. For interactive use at long context, run at 131k (`-cs 131072
 -cq 4`) or below; for a one-shot 200k+ document the machine can do it, budget the TTFT.
 
-Enable in `run.sh` with `CACHE=262144 CQ=4 bash scripts/run.sh`.
+`run.sh` defaults to 200k with Q4; `CACHE=262144 bash scripts/run.sh` for the full window.
 
 ## The five traps
 
