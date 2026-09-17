@@ -87,6 +87,17 @@ kernel already streams at this GPU's practical single-kernel rate (~135 GB/s); t
 prefetch depth, reduce-pad, row-looped mixers, graph replay, …). Re-running them is the most
 likely way to burn a day here. ~41 t/s mean is the ceiling for this pack on this GPU.
 
+## Context length facts (don't re-measure these)
+
+- fp16 KV cache: loads up to `-cs 106496`; 114688+ OOMs **at load** (transient — steady state
+  would fit). Q4 cache (`-cq 4`): the model's full **262,144** loads (58.3 GiB) and decodes at
+  30.9 tok/s with the cache completely full. `CACHE=262144 CQ=4 bash scripts/run.sh`.
+- Cold prefill is 315–350 tok/s. A 262k prompt is a 14-minute TTFT. Do not report a
+  "hang" before that. Don't be fooled by 900–1,500 tok/s prefill on repetitive text — that
+  is the n-gram path recognising repeats, not the real rate.
+- Decode vs depth is flat (36 → 31 tok/s from empty to full 262k). If you see a cliff, it is
+  something else.
+
 ## Things that will bite a custom script
 
 - **MTP caches**: `Cache(..., max_history=N)` must equal `num_draft_tokens` on **both** the

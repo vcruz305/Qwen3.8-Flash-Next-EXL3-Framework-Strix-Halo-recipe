@@ -18,6 +18,10 @@ Measured on `framework2` (Framework Desktop, Ubuntu 26.04), 2026-09-17, greedy, 
 | Stock AMD fork on this GPU (reconstruct + hgemm fallback) | 4.3 tok/s |
 | Perplexity, 20 × 1024 tokens | 4.2259 — unchanged by every kernel change below |
 | TTFT, short prompt | 0.25 s |
+| **Max context** | **262,144 tokens — the model's full window — with a Q4 KV cache** (`-cq 4`); 98,304 with fp16 cache |
+| Decode with the cache **full** (262,005-token cold prompt, Q4) | **30.9 tok/s**, 63% acceptance |
+| Cold prefill | 315–350 tok/s on real prose; up to 1,500 tok/s on repetitive text (n-gram path) |
+| TTFT, 262k cold prompt | 833 s (13.9 min) |
 | GPU memory at load (model + MTP head + 32k cache) | 57.8 GiB of 61.4 GiB visible |
 
 That is **11× the fork's stock fallback path** and about 60–65% of what the same pack does
@@ -33,6 +37,7 @@ contract, the definition of done, and the traps in the order an agent will hit t
 - [Quick start](#quick-start)
 - [What the runtime fork changes](#what-the-runtime-fork-changes)
 - [Tuning knobs and what they measured](#tuning-knobs-and-what-they-measured)
+- [Context length](#context-length)
 - [The five traps](#the-five-traps)
 - [How things were measured](#how-things-were-measured)
 - [Hardware, model, memory](#hardware-model-memory)
@@ -160,7 +165,54 @@ has the full table, the null-result reasoning, and the 40+ profiling harnesses u
 | `EXL3_HIP_SKINNY_GEMM` | 1 | 0 → hipblaslt for the small GDN projections, −2.5%. |
 | `EXL3_BLOCK_GRAPH` | unset | Graph replay: neutral under MTP at every speed tested (47.0 vs 47.4 last). Not launch-bound. |
 | `EXL3_INT8_GEMV` | unset | 1/2 → within 0.3 tok/s of off. m≤2 GEMVs are 6% of decode. |
-| `-cs` (cache tokens) | 32768 | Memory, not speed. 57.8 GiB at 32k; ~60 GiB is the ceiling for this pack on a 61.4 GiB GPU. |
+| `-cs` (cache tokens) | 32768 | Memory, not speed. fp16 loads to 106k; **`-cq 4` loads the full 262,144**. See [Context length](#context-length). |
+| `-cq` (cache quant) | unset (fp16) | `4` → 262k fits, −2 tok/s. `8` → 131k tested. |
+
+## Context length
+
+Measured 2026-09-17 with `tools/strix_halo/ctx_sweep.py` (MTP ndt=3 dc=0.6, greedy, 128 new
+tokens). "Fill" rows use a **random-token prompt** sized to leave exactly 128 + draft slots free,
+so they are true cold prefills with zero prefix reuse and the cache at 100%.
+
+| Cache | Config | Loads? | Resident after load |
+|---|---|---|---|
+| 32,768 | fp16 | yes | 56.4 GiB |
+| 98,304 | fp16 | yes | 58.3 GiB |
+| 106,496 | fp16 | yes | 58.5 GiB |
+| 114,688 | fp16 | **OOM** at load | — |
+| 131,072 | Q8 (`-cq 8`) | yes | 57.7 GiB |
+| **262,144** | **Q4 (`-cq 4`)** | **yes** | **58.3 GiB** |
+| 393,216 | Q4 | loads (59.7 GiB) — beyond `max_position_embeddings`, for the record only |
+| 524,288 | Q4 | OOM at load | — |
+
+The fp16 cache costs ~30 KiB/token here (3 of every 4 layers are gated-delta-net recurrent
+state, only every 4th is full attention), so the OOM at 112k is a **load-time transient**, not
+steady state — the model itself is 55.5 GiB and a 100k fp16 cache steady-states at 58.5. Q4
+shrinks the attention KV by 4× and makes the full 262k window fit with 3 GiB to spare.
+
+Decode barely cares about depth. Q4 cache, 262,144 configured:
+
+| Prompt tokens | Cold TTFT | Prefill tok/s | Decode tok/s | Acceptance | Peak GiB |
+|---|---|---|---|---|---|
+| 1,024 | 3.0 s | 345 | 36.1 | 62% | 58.7 |
+| 8,192 | 23 s | 351 | 32.9 | 68% | 59.5 |
+| 32,768 | 75 s | 435 | 33.1 | 66% | 59.5 |
+| 65,536 | 101 s | 649 | 32.7 | 64% | 59.5 |
+| 131,072 | 203 s | 646 | 36.0 | 73% | 59.6 |
+| 200,000 | 219 s | 915 | 37.5 | 79% | 59.7 |
+| 250,000 | 164 s | 1,526 | 34.4 | 72% | 59.7 |
+| **262,005 (full, random)** | **833 s** | **314** | **30.9** | 63% | 59.5 |
+
+fp16 cache, 98,304 configured: 38.7 / 38.0 / **37.0 tok/s at 1k / 32k / 98,165 (full)**.
+
+Read it as: Q4 cache costs ~2 tok/s against fp16 at equal depth (36.1 vs 38.7 at 1k); going
+from an empty cache to a full 262k one costs another ~5 (36 → 31); and the prefill numbers
+above 32k on the repeated-README prompt are inflated by the pack's n-gram / prefix machinery
+recognising repetition — **315–350 tok/s is the honest cold prefill rate**, which makes a full
+262k prompt a 14-minute wait. For interactive use at long context, run at 131k (`-cs 131072
+-cq 4`) or below; for a one-shot 200k+ document the machine can do it, budget the TTFT.
+
+Enable in `run.sh` with `CACHE=262144 CQ=4 bash scripts/run.sh`.
 
 ## The five traps
 
@@ -232,6 +284,7 @@ Each of these looks like broken hardware and each is encoded in `scripts/env.sh`
   now streams at the part's practical rate; the gap to DRAM peak is spread over ~1,300 launches
   per verify step. Getting to 50 needs fewer bytes (a lower-bit expert re-quant) or a better
   drafter, not faster kernels.
+- Cold prefill is 315–350 tok/s (GB10 does ~1,100): a 262k prompt takes 14 minutes. There is no prefix cache across processes.
 - The pack's n-gram table (32.6 GB) stays on disk and is page-cached; the first prompt after
   a cold boot pays for that (~0 MiB read during decode once warm).
 - `hipblaslt 'out of memory'` at load immediately after another process exited is a
