@@ -1,0 +1,16 @@
+Explain gradient descent in two sentences.
+Write a Python function that reverses a linked list.
+Summarize the causes of the 1929 stock market crash.
+Describe the difference between a process and a thread.
+What is the difference between TCP and UDP?
+Explain why the sky is blue.
+Write a SQL query that finds duplicate rows in a table.
+What does a compiler's register allocator do?
+Explain the CAP theorem briefly.
+Describe how a diesel engine differs from a petrol engine.
+Write a bash one-liner that finds the ten largest files under a directory.
+Explain what a Merkle tree is and where it is used.
+What is the halting problem?
+Summarize how HTTPS certificate validation works.
+Explain the difference between mutex and semaphore.
+Write a Python generator that yields Fibonacci numbers.

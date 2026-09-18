@@ -98,6 +98,22 @@ kernel already streams at this GPU's practical single-kernel rate (~135 GB/s); t
 prefetch depth, reduce-pad, row-looped mixers, graph replay, …). Re-running them is the most
 likely way to burn a day here. ~41 t/s mean is the ceiling for this pack on this GPU.
 
+## Throughput vs latency: use batch.sh when you have more than one request
+
+Single-stream decode is latency-limited near 47 tok/s greedy and that is a real wall.
+Aggregate throughput is **not** capped there: ~32 ms of every verification forward is
+row-independent, so concurrent sequences share it.
+
+- `scripts/batch.sh -f prompts.txt` → **74 tok/s aggregate** (16-prompt queue, batch 5).
+- **The 16-row rule:** the grouped-MoE kernel works in 16-row chunks. `batch × (ndt+1)` must
+  land on or just under a multiple of 16. At `-ndt 2`, batch 5 = 15 rows = one full chunk;
+  batch 6 = 18 rows and **loses 24%**. Do not "optimise" by raising the batch by one.
+- **Queue deeper than batch**, or the batch drains and you measure ~51 instead of 74.
+- Per-sequence latency *falls* as batch rises. For a single interactive reply use `run.sh`.
+
+If a user asks for "more tok/s", establish first whether they mean one stream (47 is near
+the wall) or total work done (batch it). These are different machines.
+
 ## Context length facts (don't re-measure these)
 
 - fp16 KV cache: loads up to `-cs 106496`; 114688+ OOMs **at load** (transient — steady state

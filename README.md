@@ -15,6 +15,7 @@ Measured on `framework2` (Framework Desktop, Ubuntu 26.04), 2026-09-17, greedy, 
 | Decode, best prompt (greedy) | **47.5 tok/s** |
 | Decode, worst prompt (greedy, prose, 63% draft acceptance) | 35.6 tok/s |
 | Decode, **`run.sh` default** (sampling temp 0.8, 200k Q4, 13 runs) | **25–37 tok/s** (acceptance 37–63%) — this is what interactive chat prints |
+| **Aggregate, batched** (`batch.sh`, 16-prompt queue, batch 5) | **74.0 tok/s** (2.2× one stream; see [Batched generation](#4-batched-generation-agent-fan-out-eval-sweeps-offline-jobs)) |
 | Decode, no speculation | ~19 tok/s |
 | Reconstruct + hgemm fallback **with MTP still on** | **~8–10 tok/s** (the "I followed AGENTS.md and got 8 t/s" report) |
 | Stock AMD fork on this GPU (reconstruct + hgemm, no MTP) | 4.3 tok/s |
@@ -37,6 +38,7 @@ contract, the definition of done, and the traps in the order an agent will hit t
 ## Contents
 
 - [Quick start](#quick-start)
+- [Batched generation](#4-batched-generation-agent-fan-out-eval-sweeps-offline-jobs)
 - [What the runtime fork changes](#what-the-runtime-fork-changes)
 - [Tuning knobs and what they measured](#tuning-knobs-and-what-they-measured)
 - [Context length](#context-length)
@@ -118,7 +120,40 @@ before load if `wmma_family != 2` so you cannot silently land on the 8 t/s fallb
 `NDT=2 DC=0.4 bash scripts/run.sh` gives the higher-acceptance point (better on the easiest
 prompts, ~2% lower mean). Any other `chat.py` flag passes through.
 
-### 4. Benchmark (optional)
+### 4. Batched generation (agent fan-out, eval sweeps, offline jobs)
+
+One stream is latency-limited near 47 tok/s, but ~32 ms of every verification forward is
+row-independent, so concurrent sequences share it — **aggregate throughput roughly doubles**:
+
+```bash
+bash scripts/batch.sh -f scripts/example_prompts.txt        # 74 tok/s aggregate
+bash scripts/batch.sh -p "Explain X" -p "Summarize Y" -o out.jsonl
+```
+
+Measured on a 16-prompt queue (chat template, stop conditions, Q4 cache, greedy, 512 max):
+
+| batch | rows in forward | aggregate tok/s |
+|---|---|---|
+| 1 | 3 | 34.2 |
+| 4 | 12 | 66.1 |
+| **5** | **15** | **74.0** |
+| 6 | 18 | 56.1 ⚠ |
+| 8 | 24 | 68.0 |
+| 10 | 30 | 72.7 |
+
+**The 16-row rule.** The grouped-MoE kernel processes expert rows in chunks of 16
+(`MOE_PREFILL_ROWS_PER_CHUNK`). A batch of B sequences at `-ndt K` puts `B*(K+1)` rows into
+one forward, so choose B such that `B*(K+1)` lands **on or just under a multiple of 16**. At
+the default `-ndt 2` (3 rows/sequence) B=5 gives exactly 15 rows — one full chunk — while
+B=6 gives 18, a full chunk plus a nearly-empty second one, and **loses 24%**. This is why
+the default is 5 and not 6.
+
+**Keep the queue deeper than the batch.** Aggregate throughput requires the batch stay full.
+Four prompts at `-b 4` drains as sequences finish and yields ~51 tok/s; sixteen prompts at
+`-b 5` sustains 74. Per-sequence latency falls as batch rises, so this is the wrong tool for
+one interactive reply — use `run.sh` for that.
+
+### 5. Benchmark (optional)
 
 ```bash
 cd ~/exllamav3-amd && source env.sh
