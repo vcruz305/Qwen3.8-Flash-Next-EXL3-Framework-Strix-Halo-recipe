@@ -31,6 +31,7 @@ export EXL3_HIP_GR_MIX_Q8="${EXL3_HIP_GR_MIX_Q8:-1}"
 # Fail fast if the HIP GEMV path is not the one we built. Reconstruct+hgemm + MTP lands at
 # ~8-10 t/s — the number people report when they skip setup.sh or shadow a stale .so.
 .venv/bin/python - <<'PY'
+import torch  # load libtorch before the extension (RPATH)
 import exllamav3_ext as e, sys
 ok = bool(e.exl3_gemv_supported(0)) and int(e.exl3_gemv_wmma_family(0)) == 2
 if not ok:
