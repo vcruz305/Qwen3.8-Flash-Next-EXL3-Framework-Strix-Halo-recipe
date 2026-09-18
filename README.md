@@ -11,16 +11,18 @@ Measured on `framework2` (Framework Desktop, Ubuntu 26.04), 2026-09-17, greedy, 
 
 | | |
 |---|---|
-| Decode, MTP self-speculation, six-prompt **mean** | **41.3 tok/s** (ndt=3, dc=0.6) · 40.6 (ndt=2) |
-| Decode, best prompt | **47.5 tok/s** |
-| Decode, worst prompt (prose, 63% draft acceptance) | 35.6 tok/s |
+| Decode, MTP self-speculation, six-prompt **mean** (**greedy**) | **41.3 tok/s** (ndt=3, dc=0.6) · 40.6 (ndt=2) |
+| Decode, best prompt (greedy) | **47.5 tok/s** |
+| Decode, worst prompt (greedy, prose, 63% draft acceptance) | 35.6 tok/s |
+| Decode, **`run.sh` default** (sampling temp 0.8, 200k Q4, 13 runs) | **25–37 tok/s** (acceptance 37–63%) — this is what interactive chat prints |
 | Decode, no speculation | ~19 tok/s |
-| Stock AMD fork on this GPU (reconstruct + hgemm fallback) | 4.3 tok/s |
+| Reconstruct + hgemm fallback **with MTP still on** | **~8–10 tok/s** (the "I followed AGENTS.md and got 8 t/s" report) |
+| Stock AMD fork on this GPU (reconstruct + hgemm, no MTP) | 4.3 tok/s |
 | Perplexity, 20 × 1024 tokens | 4.2259 — unchanged by every kernel change below |
 | TTFT, short prompt | 0.25 s |
 | **Max context** | **262,144 tokens — the model's full window — with a Q4 KV cache** (`-cq 4`); 98,304 with fp16 cache |
 | Decode with the cache **full** (262,005-token cold prompt, Q4) | **30.9 tok/s**, 63% acceptance |
-| Cold prefill | 315–350 tok/s on real prose; up to 1,500 tok/s on repetitive text (n-gram path) |
+| Cold prefill (random tokens, chunk 512) | **450–500 tok/s**; 315–350 was the pre-fix rate (hipblaslt fp32-out GEMM at 6 TFLOP/s). Repetitive text still hits 900–1,500 via the n-gram path |
 | TTFT, 262k cold prompt | 833 s (13.9 min) |
 | GPU memory at load (model + MTP head + 200k Q4 cache) | ~57.7 GiB of 61.4 GiB visible |
 
@@ -103,10 +105,14 @@ separately and file-backed, and that is what fits an 80 GB pack into 61 GiB.
 ```bash
 bash scripts/run.sh                                   # interactive chat, prints tok/s per reply
 bash scripts/run.sh -prompt "Explain gradient descent in two sentences."
+GREEDY=1 bash scripts/run.sh -prompt "Explain gradient descent in two sentences." -no_think
 ```
 
 `run.sh` is `examples/chat.py` with the measured-best flags:
-`-mode qwen35 -mtp -ndt 3 -dds -dc 0.6 -cs 204800 -cq 4 -tps` and `EXL3_MOE_CFG=2 EXL3_HIP_PREFILL_MIN_ROWS=2`.
+`-mode qwen35 -mtp -ndt 3 -dds -dc 0.6 -cs 204800 -cq 4 -gcs 512 -tps` and `EXL3_MOE_CFG=2 EXL3_HIP_PREFILL_MIN_ROWS=2`.
+It **samples at temp 0.8** (chat.py's default) unless `GREEDY=1` (`-temp 0`). Interactive
+speed is 25–37 t/s; the 35–47 / 41.3-mean table above is greedy only. `run.sh` aborts
+before load if `wmma_family != 2` so you cannot silently land on the 8 t/s fallback.
 **Default context is 200k tokens with a Q4 KV cache** (see [Context length](#context-length));
 `CACHE=262144` gives the full window, `CACHE=32768 CQ=` a short fp16 cache that is ~2 tok/s faster.
 `NDT=2 DC=0.4 bash scripts/run.sh` gives the higher-acceptance point (better on the easiest
@@ -286,7 +292,9 @@ Each of these looks like broken hardware and each is encoded in `scripts/env.sh`
   now streams at the part's practical rate; the gap to DRAM peak is spread over ~1,300 launches
   per verify step. Getting to 50 needs fewer bytes (a lower-bit expert re-quant) or a better
   drafter, not faster kernels.
-- Cold prefill is 315–350 tok/s (GB10 does ~1,100): a 262k prompt takes 14 minutes. There is no prefix cache across processes.
+- Cold prefill is 450–500 tok/s on random tokens with `-gcs 512` (was 315–350 before the
+  fp16-accumulate workaround for hipblaslt's 6 TFLOP/s fp32-out GEMM). GB10 still does
+  ~1,100. A 262k prompt is ~9–10 minutes. There is no prefix cache across processes.
 - The pack's n-gram table (32.6 GB) stays on disk and is page-cached; the first prompt after
   a cold boot pays for that (~0 MiB read during decode once warm).
 - `hipblaslt 'out of memory'` at load immediately after another process exited is a
@@ -310,7 +318,10 @@ Each of these looks like broken hardware and each is encoded in `scripts/env.sh`
 | `cannot find ROCm device library` | Trap 4 — `HIPCC_COMPILE_FLAGS_APPEND` not set; use `env.sh build`. |
 | `ModuleNotFoundError: No module named 'exllamav3'` during build | Built with `uv pip`; use `pip --no-build-isolation`. |
 | PPL fine but `bench_mtp.py` dies with `cannot convert float NaN` | A build that shrank `HIP_MMA_STG_WARPS`. PPL does not exercise every path; always run both. |
-| Slow decode, 15–20 tok/s | MTP off (`-mtp` missing) or `EXL3_HIP_PREFILL_MIN_ROWS` unset. |
+| Slow decode, **8–12 t/s, `Draft:` line present** | HIP GEMV inactive (reconstruct + MTP). `run.sh` now refuses to start. Stale repo-root `.so`, skipped `setup.sh`, or GPU still held (`hipblaslt 'out of memory'` then a wedged run — wait 10 s and retry). |
+| Slow decode, 15–20 tok/s, no `Draft:` line | MTP off (`-mtp` missing). |
+| Slow decode, 25–37 t/s, `Draft:` line, no `GREEDY=1` | **Normal sampling.** Do not "fix". Compare against greedy (`GREEDY=1`) or `bench_mtp.py -g`. |
+| `run.sh` exits 2: `HIP GEMV inactive` | `wmma_family != 2`. Rebuild per the error text; copy the venv `.so` over the repo-root shadow. |
 
 ## Related repositories
 

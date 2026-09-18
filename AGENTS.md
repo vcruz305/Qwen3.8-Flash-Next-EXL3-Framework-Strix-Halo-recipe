@@ -13,13 +13,20 @@ git clone https://github.com/vcruz305/Qwen3.8-Flash-Next-EXL3-Framework-Strix-Ha
 cd Qwen3.8-Flash-Next-EXL3-Framework-Strix-Halo-recipe
 bash scripts/setup.sh        # ~10 min. Needs sudo once (apt). Idempotent; rerun on failure.
 bash scripts/download.sh     # ~80 GB from Hugging Face to ~/models/Qwen3.8-Flash-Next-EXL3
-bash scripts/run.sh -prompt "Explain gradient descent in two sentences." -no_think
+GREEDY=1 bash scripts/run.sh -prompt "Explain gradient descent in two sentences." -no_think
 ```
+
+`run.sh` without `GREEDY=1` uses chat.py's default sampler (temp 0.8). That is the
+interactive path and lands at **25–37 t/s** with 37–63% draft acceptance. The README's
+35–47 / 41.3-mean numbers are **greedy**. Do not compare them. The verification command
+above sets `GREEDY=1` (`-temp 0`) so you are measuring the same thing the README quotes.
 
 **Done means** the last command prints a coherent answer followed by a line like
 `Generate: N tokens at 35-47 t/s - Draft: X / Y accepted (60-90%)`. Anything under
-~30 t/s with the draft line present, or a missing draft line, is a misconfiguration —
-see "Speed is wrong" below. Do not declare success on "it produced text".
+~30 t/s *with GREEDY=1 and the draft line present*, or a missing draft line, is a
+misconfiguration — see "Speed is wrong" below. **~8–12 t/s with a draft line is the
+reconstruct+hgemm fallback with MTP still on** (skipped rebuild, stale repo-root `.so`,
+or GPU still held by another process). Do not declare success on "it produced text".
 
 `setup.sh` ends with a self-check that must print `exl3_gemv_supported: True wmma_family: 2`.
 If it prints `False`, stop and read Trap 1–2 below; do not proceed to the download.
@@ -71,14 +78,18 @@ If it prints `False`, stop and read Trap 1–2 below; do not proceed to the down
 
 ## Speed is wrong
 
-Expected: 35–47 t/s single stream, greedy, with `Draft: ... accepted (60–90%)` printed.
+Expected **with `GREEDY=1`**: 35–47 t/s single stream, `Draft: ... accepted (60–90%)`.
+Expected **without it** (`run.sh` default, temp 0.8): 25–37 t/s, acceptance 37–63%. That
+is not a bug. Reproduced 2026-09-17 across 13 published-`run.sh` invocations.
 
 | You see | Cause |
 |---|---|
-| ~4–5 t/s | WMMA path inactive (`exl3_gemv_supported() == False`). Wrong branch (`integration` instead of `main`/`strix-halo`) or stale extension. `git -C ~/exllamav3-amd log --oneline -1` should show a gfx1151 commit; rebuild. |
+| ~4–5 t/s, no `Draft:` line | WMMA path inactive *and* MTP off. Wrong branch or you invoked `chat.py` yourself without `-mtp`. |
+| **~8–12 t/s with a `Draft:` line** | **HIP GEMV inactive, MTP still on.** Reconstruct + hgemm is 4.3 t/s; MTP roughly doubles it. `run.sh` now aborts before load if `wmma_family != 2`. If you bypassed it: stale repo-root `exllamav3_ext*.so` (it shadows site-packages — copy the venv `.so` over it), or another process still holds the GPU (`hipblaslt 'out of memory'` at load, then a wedged 8 t/s run). Wait 10 s, `GREEDY=1 bash scripts/run.sh ...` once. Reproduced at 9.94 t/s on a GPU that had just been released. |
 | ~15–20 t/s, no `Draft:` line | MTP off. `run.sh` passes `-mtp -ndt 3 -dds -dc 0.6`; if you wrote your own invocation, add them. |
-| ~30 t/s with draft line | `EXL3_MOE_CFG=2` / `EXL3_HIP_PREFILL_MIN_ROWS=2` not exported. `run.sh` sets them. |
-| Numbers vary ±25% run to run | You are sampling. Benchmark greedy (`bench_mtp.py -g`); acceptance is deterministic only under greedy. |
+| **25–37 t/s with a draft line, no `GREEDY=1`** | **Normal.** You are sampling. Do not "fix" this. |
+| ~30 t/s *with* `GREEDY=1` and a draft line | `EXL3_MOE_CFG=2` / `EXL3_HIP_PREFILL_MIN_ROWS=2` not exported. `run.sh` sets them. |
+| Numbers vary ±25% run to run | You are sampling. Benchmark greedy (`GREEDY=1` or `bench_mtp.py -g`); acceptance is deterministic only under greedy. |
 | One prompt at 47, another at 35 | Normal. Draft acceptance is content-dependent. Quote `prompt_sweep.py`'s six-prompt mean, never a single prompt. |
 
 **Do not attempt further kernel optimisation** unless the user explicitly asks. Every bulk
@@ -92,9 +103,9 @@ likely way to burn a day here. ~41 t/s mean is the ceiling for this pack on this
 - fp16 KV cache: loads up to `-cs 106496`; 114688+ OOMs **at load** (transient — steady state
   would fit). Q4 cache (`-cq 4`): the model's full **262,144** loads (58.3 GiB) and decodes at
   30.9 tok/s with the cache completely full. **`run.sh` defaults to 200k + Q4**; `CACHE=262144` for the full window, `CACHE=32768 CQ=` for a short fp16 cache.
-- Cold prefill is 315–350 tok/s. A 262k prompt is a 14-minute TTFT. Do not report a
-  "hang" before that. Don't be fooled by 900–1,500 tok/s prefill on repetitive text — that
-  is the n-gram path recognising repeats, not the real rate.
+- Cold prefill is 450–500 tok/s with `-gcs 512` (run.sh default). A 262k prompt is ~9–10
+  minutes. Do not report a "hang" before that. Don't be fooled by 900–1,500 tok/s prefill
+  on repetitive text — that is the n-gram path recognising repeats, not the real rate.
 - Decode vs depth is flat (36 → 31 tok/s from empty to full 262k). If you see a cliff, it is
   something else.
 
